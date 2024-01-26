@@ -139,7 +139,9 @@ def company_addit_dry_wet(wet_dry, ice_on_ld, ice_off_ld):
     return int(ICE_ON_wet_dry_adjusted_ld), int(ICE_OFF_wet_dry_adjusted_ld)
 
 
-def get_torque_limits(temp, pressure_alt, vapp):
+def get_torque_limits(temp, pressure_alt, vapp, bleeds):
+    if bleeds == "On":
+        temp = temp + 7
     if temp < 14:
         temp = 14
     if temp > 48:
@@ -198,6 +200,55 @@ def get_torque_limits(temp, pressure_alt, vapp):
         mtop = 100
 
     return round(ntop, 2), round(mtop, 2)
+
+
+def get_oei_climb(temp, elev, flap, weight):
+    """scale is 0.002 units per dashed line
+    Q300"""
+    elev = elev * 500
+    weight = weight / 1000
+    elevation_envelope = -0.10
+    if temp <= 42:
+        temp_diff = 42 - temp
+        elevation_envelope = temp_diff * 230
+    print(elevation_envelope, "Elevation envelope")
+    if flap == "10":
+        ref_weight = 14
+        weight_change = 0.009
+        if elev > elevation_envelope:
+            print("Bottom scale")
+            temp_change = 0.0014
+            elev_change = 0.007
+            base = 0.1337
+
+        else:
+            print("Top scale")
+            temp_change = 0.00027
+            elev_change = 0.0025
+            base = 0.087
+    else:  # flap 15 missed
+        ref_weight = 14
+        weight_change = 0.009
+        if elev > elevation_envelope:
+            print("Bottom scale")
+            temp_change = 0.0013
+            elev_change = 0.0069
+            base = 0.1218
+        else:
+            print("Top scale")
+            temp_change = 0.00026
+            elev_change = 0.0025
+            base = 0.079
+
+    temp_elev_units = base - (temp * temp_change) - ((elev / 1000) * elev_change)
+    print(temp_elev_units, "temp elev")
+
+    variance_from_12t = weight - ref_weight
+    weight_units = variance_from_12t * weight_change
+    initial_units = temp_elev_units - weight_units
+    print(initial_units)
+
+    return round(initial_units * 100, 2)
 
 
 def get_wat_limit(temp, flap, ice_protection, bleed, pressure_alt, test_case):
@@ -293,22 +344,76 @@ def max_landing_wt_lda(lda, ice, ICE_ON_dry_wet, ICE_OFF_dry_wet, wet_dry, flap,
     return int(final)
 
 
-def final_max_weight(max_wat, max_field, MLDW, off_chart):
+def max_brake_energy_wt(flap, temp, elev, weight, head_tail):
+    """ example using flap 15...
+    for every X degrees C, increase by Y units (0.032 per degree). starting at 0 degrees base of 8 at sea
+    level.
+    add 0.4 for every 1000' elevation.
+    starting from 14t. every 1t = 1.8 units
+    + 4.5 for every 10kt tail
+    - 1.2 for every 10 kt tail """
+    weight = int(weight) / 1000
+    flap = str(flap)
+    temp = int(temp)
+    elev = int(elev * 500)
+    head_tail = int(head_tail)
+    print(flap, temp, elev, weight, head_tail)
+    max_brake_limit = 22.54
+    if flap == "15":
+        temp_change = 0.032
+        base = 8
+        elev_change = 0.4
+        ref_weight = 14
+        weight_change = 1.8
+        tail_change = 0.45
+        head_change = 0.12
+    else:
+        temp_change = 0.025
+        base = 6.3
+        elev_change = 0.25
+        ref_weight = 14
+        weight_change = 1.55
+        tail_change = 0.3
+        head_change = 0.1
+
+    temp_elev_units = base + (temp * temp_change) + ((elev / 1000) * elev_change)
+    variance_from_14t = weight - ref_weight
+    weight_units = variance_from_14t * weight_change
+    initial_units = temp_elev_units + weight_units
+    if head_tail < 0:
+        final_brake_energy = initial_units + (abs(head_tail) * tail_change)
+    else:
+        final_brake_energy = initial_units - (abs(head_tail) * head_change)
+    print(final_brake_energy, "is the brake energy")
+    difference_between_current_and_max = max_brake_limit - final_brake_energy
+    max_weight = ref_weight + ((weight_units + difference_between_current_and_max) / weight_change)
+    print(int(max_weight * 1000), "Is the max brake energy weight for given conditions")
+    return int(max_weight * 1000)
+
+
+def final_max_weight(max_wat, max_field, max_brake_nrg_weight, MLDW, off_chart):
     """Find and return the lowest weight out of all provided. Also add * to any code where the wat weight
     used a parameter that was off chart."""
-    # f means field, s means struc, c means climb
-    if max_wat < max_field:
-        max_weight = max_wat
+    weights = [max_wat, max_field, max_brake_nrg_weight, MLDW]
+    # Find the minimum weight
+    min_weight = min(weights)
+
+    # Assign the corresponding code
+    if min_weight == max_wat:
         code_max = "(c)"
-    else:
-        max_weight = max_field
+    elif min_weight == max_field:
         code_max = "(f)"
-    if max_weight > MLDW:
-        max_weight = MLDW
+    elif min_weight == max_brake_nrg_weight:
+        code_max = "(b)"
+    else:
         code_max = "(s)"
 
+    # Add * if off_chart is True
     if off_chart:
-        max_weight = str(max_weight) + code_max + "^"
+        code_max += "*"
+
+    if off_chart:
+        max_weight = str(min_weight) + code_max + "^"
     else:
-        max_weight = str(max_weight) + code_max
+        max_weight = str(min_weight) + code_max
     return max_weight
